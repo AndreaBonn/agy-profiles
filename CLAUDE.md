@@ -26,6 +26,8 @@ uv run coverage run -m pytest && uv run coverage combine -q && uv run coverage r
 
 ## Da sapere
 
+- Il failover sulla quota è spento di default: si attiva con `AGY_POOL_FAILOVER=1` (`FAILOVER_ENABLED`). In locale si accende con `.env` accanto allo script (ignorato da git, letto da `load_env_file`, solo chiavi `AGY_POOL_*`); `.env.example` lo tiene a `0`. I test lo accendono in `PoolEnv` e puntano `AGY_POOL_ENV_FILE` a un file inesistente, così un `.env` reale non li influenza. Non renderlo di nuovo attivo per default: è una scelta legata ai termini d'uso di Antigravity.
+
 - Il riconoscimento della quota (`QUOTA_RE`) non è stato visto su un errore reale di `agy`. Al primo errore vero guardare `~/.agy-pool/quota-errors.log` e tararlo.
 - Lo stato condiviso tra gli account è fatto di symlink (`SHARED_ITEMS`). Il token resta per account e non va mai in `SHARED_ITEMS`.
 - `DROPPED_AGENT_FIELDS` elenca i campi degli agent Claude che `agy` rifiuta. Se `agy` cambia versione, rifare la verifica descritta in `docs/`.

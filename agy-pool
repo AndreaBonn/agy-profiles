@@ -17,6 +17,42 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+ENV_PREFIX = "AGY_POOL_"
+
+
+def parse_env_text(*, text: str) -> dict[str, str]:
+    """Read ``KEY=VALUE`` lines, keeping only ``AGY_POOL_*`` keys.
+
+    Blank lines, ``#`` comments and an ``export`` prefix are accepted; one pair of
+    matching quotes around the value is removed. Other keys (``PATH``,
+    ``LD_PRELOAD``) are ignored on purpose: the file must not change how the
+    process finds or loads anything.
+    """
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip().removeprefix("export ")
+        key, sep, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if line.startswith("#") or not sep or not key.startswith(ENV_PREFIX):
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def load_env_file() -> None:
+    """Load ``.env`` next to the script (symlinks resolved); real env vars win."""
+    override = os.environ.get("AGY_POOL_ENV_FILE")
+    path = Path(override) if override else Path(__file__).resolve().parent / ".env"
+    if not path.is_file():
+        return
+    for key, value in parse_env_text(text=path.read_text(encoding="utf-8-sig")).items():
+        os.environ.setdefault(key, value)
+
+
+load_env_file()
+
 POOL_DIR = Path(os.environ.get("AGY_POOL_DIR", str(Path.home() / ".agy-pool")))
 SHARED_DIR = POOL_DIR / "shared"
 STATE_FILE = POOL_DIR / "state.json"
@@ -40,6 +76,7 @@ SHARED_ITEMS = (
 )
 PRINT_FLAGS = ("-p", "--print", "--prompt")
 RESET_HOURS = float(os.environ.get("AGY_POOL_RESET_HOURS", "5"))
+FAILOVER_ENABLED = os.environ.get("AGY_POOL_FAILOVER") == "1"
 TAIL_BYTES = 4096
 EXIT_ALL_EXHAUSTED = 75
 CHECK_PROMPT = "Reply with the single word OK"
@@ -439,13 +476,17 @@ def pool_command(*, argv: list[str]) -> None:
         die("uso: agy-pool pool [init|setup|login NAME|check [NAME..]|status|next|use NAME]")
 
 
+def is_print_run(*, argv: list[str]) -> bool:
+    return any(flag in argv or any(a.startswith(f"{flag}=") for a in argv) for flag in PRINT_FLAGS)
+
+
 def main() -> None:
     argv = sys.argv[1:]
     if argv[:1] != ["pool"]:
         sync_agents()
     if argv[:1] == ["pool"]:
         pool_command(argv=argv[1:])
-    elif any(flag in argv or any(a.startswith(f"{flag}=") for a in argv) for flag in PRINT_FLAGS):
+    elif FAILOVER_ENABLED and is_print_run(argv=argv):
         sys.exit(run_with_failover(args=argv))
     else:
         run_interactive(args=argv)

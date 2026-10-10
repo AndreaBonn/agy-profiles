@@ -11,6 +11,9 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "agy-pool"
 
+# A developer's own .env next to the script must not leak into the tests.
+os.environ["AGY_POOL_ENV_FILE"] = str(SCRIPT.parent / "no-such.env")
+
 FAKE_AGY = """#!/bin/sh
 acc="${HOME##*/}"
 echo "$acc" >> "$AGY_CALLS"
@@ -72,6 +75,7 @@ class PoolEnv:
             "AGY_FAKE_DIR": str(self.fake),
             "AGY_CALLS": str(self.calls),
             "AGY_ARGS": str(self.args_log),
+            "AGY_POOL_FAILOVER": "1",
         }
         self.env.pop("AGY_POOL_DIR", None)
         self.env.pop("AGY_POOL_RESET_HOURS", None)

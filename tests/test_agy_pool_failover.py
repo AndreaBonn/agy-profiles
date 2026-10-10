@@ -26,6 +26,17 @@ def test_print_flags_run_through_the_failover(env: PoolEnv, args: list[str]) -> 
     assert env.called() == ["acc1", "acc2"]
 
 
+@pytest.mark.parametrize("value", ["0", "", "true"])
+def test_prompt_runs_do_not_rotate_unless_failover_is_exactly_1(env: PoolEnv, value: str) -> None:
+    env.flag("quota", "acc1")
+
+    result = env.run("-p", "hi", extra_env={"AGY_POOL_FAILOVER": value})
+
+    assert result.returncode == 1  # agy's own quota failure, passed through: no rotation
+    assert env.called() == ["acc1"]
+    assert "nessun cambio automatico" in result.stderr
+
+
 @pytest.mark.parametrize("args", [[], ["--printer"], ["chat", "--model", "x"]])
 def test_other_invocations_are_interactive_without_failover(env: PoolEnv, args: list[str]) -> None:
     env.flag("quota", "acc1")
