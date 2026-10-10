@@ -80,10 +80,10 @@ def natural_key(name: str) -> list:
 
 
 def account_dirs() -> list[str]:
-    """Names of pool directories, in the fixed ring order."""
+    """Names of account directories (those holding a ``.gemini``), in ring order."""
     if not POOL_DIR.exists():
         return []
-    names = [p.name for p in POOL_DIR.iterdir() if p.is_dir() and p.name != "shared"]
+    names = [p.name for p in POOL_DIR.iterdir() if (p / ".gemini").is_dir()]
     return sorted(names, key=natural_key)
 
 

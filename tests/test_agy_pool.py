@@ -167,6 +167,15 @@ def test_failover_exit_zero_mentioning_quota_is_not_a_quota_error(env: PoolEnv) 
     assert env.state()["quota_hit"] == {}
 
 
+def test_status_ignores_directories_that_are_not_accounts(env: PoolEnv) -> None:
+    (env.pool_dir / "backup").mkdir()
+
+    status = env.run("pool", "status").stdout
+
+    assert "backup" not in status
+    assert "acc1" in status
+
+
 def test_status_marks_account_with_quota_hit(env: PoolEnv) -> None:
     env.flag("quota", "acc1")
     env.run("-p", "hi")

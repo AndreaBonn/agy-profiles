@@ -92,7 +92,7 @@ Tutto sta in `~/.agy-pool/` (account, stato, log degli errori di quota, configur
 ## Sviluppo
 
 ```bash
-uv run pytest      # 24 test, con un agy finto
+uv run pytest      # 25 test, con un agy finto
 uv run ruff check
 ```
 
