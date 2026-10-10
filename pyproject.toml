@@ -6,7 +6,11 @@ requires-python = ">=3.10"
 dependencies = []
 
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+dev = [
+    "coverage>=7.10",
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -17,3 +21,13 @@ extend-include = ["agy-pool"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.coverage.run]
+branch = true
+parallel = true
+patch = ["subprocess", "execv"]
+include = ["*/agy-pool"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true

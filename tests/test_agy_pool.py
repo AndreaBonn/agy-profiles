@@ -1,95 +1,10 @@
-import importlib.machinery
-import importlib.util
 import json
-import os
-import stat
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
+from conftest import PoolEnv
 
-SCRIPT = Path(__file__).resolve().parent.parent / "agy-pool"
 EXIT_ALL_EXHAUSTED = 75
-
-FAKE_AGY = """#!/bin/sh
-acc="${HOME##*/}"
-echo "$acc" >> "$AGY_CALLS"
-[ -f "$AGY_FAKE_DIR/quota_$acc" ] && { echo "Error: 429 RESOURCE_EXHAUSTED quota" >&2; exit 1; }
-[ -f "$AGY_FAKE_DIR/inelig_$acc" ] && { echo "Eligibility check failed: not eligible" >&2; exit 1; }
-[ -f "$AGY_FAKE_DIR/error_$acc" ] && { echo "boom" >&2; exit 2; }
-[ -f "$AGY_FAKE_DIR/talk_$acc" ] && { echo "the quota policy returns 429 sometimes"; exit 0; }
-echo "risposta da $acc"
-"""
-
-
-def load_module():
-    loader = importlib.machinery.SourceFileLoader("agy_pool", str(SCRIPT))
-    spec = importlib.util.spec_from_loader("agy_pool", loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
-
-
-@pytest.fixture(scope="module")
-def pool():
-    return load_module()
-
-
-class PoolEnv:
-    def __init__(self, root: Path) -> None:
-        self.home = root / "home"
-        self.fake = root / "fake"
-        self.calls = root / "calls.txt"
-        bin_dir = root / "bin"
-        for directory in (self.home, self.fake, bin_dir):
-            directory.mkdir()
-        agy = bin_dir / "agy"
-        agy.write_text(FAKE_AGY)
-        agy.chmod(agy.stat().st_mode | stat.S_IXUSR)
-        self.env = {
-            **os.environ,
-            "HOME": str(self.home),
-            "PATH": f"{bin_dir}:{os.environ['PATH']}",
-            "AGY_FAKE_DIR": str(self.fake),
-            "AGY_CALLS": str(self.calls),
-        }
-        self.env.pop("AGY_POOL_DIR", None)
-
-    @property
-    def pool_dir(self) -> Path:
-        return self.home / ".agy-pool"
-
-    def add_account(self, name: str) -> None:
-        token_dir = self.pool_dir / name / ".gemini" / "antigravity-cli"
-        token_dir.mkdir(parents=True)
-        (token_dir / "antigravity-oauth-token").write_text("{}")
-
-    def flag(self, kind: str, name: str) -> None:
-        (self.fake / f"{kind}_{name}").write_text("")
-
-    def run(self, *args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [sys.executable, str(SCRIPT), *args],
-            env=self.env,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-
-    def called(self) -> list[str]:
-        return self.calls.read_text().split() if self.calls.exists() else []
-
-    def state(self) -> dict:
-        return json.loads((self.pool_dir / "state.json").read_text())
-
-
-@pytest.fixture
-def env(tmp_path: Path) -> PoolEnv:
-    pool_env = PoolEnv(tmp_path)
-    for name in ("acc1", "acc2", "acc3"):
-        pool_env.add_account(name)
-    return pool_env
 
 
 def test_failover_quota_on_first_account_answers_from_second(env: PoolEnv) -> None:

@@ -7,7 +7,10 @@
 ```bash
 uv run pytest        # test con un agy finto (tests/test_agy_pool.py)
 uv run ruff check    # lint, config in pyproject.toml
+uv run coverage run -m pytest && uv run coverage combine -q && uv run coverage report  # line+branch, fail_under 100
 ```
+
+`pytest-cov` non va usato: lo script gira in subprocess e vede solo ~29%. La config `patch = ["subprocess", "execv"]` in `pyproject.toml` misura anche quelli.
 
 ## Struttura
 
