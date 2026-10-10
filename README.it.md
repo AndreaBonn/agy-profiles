@@ -193,3 +193,11 @@ Rilasciato con licenza MIT. Vedi [LICENSE](./LICENSE).
 ## Supporta il progetto
 
 Se questo progetto ti è stato utile, lascia una stella su [GitHub](https://github.com/AndreaBonn/agy-profiles): aiuta altri a scoprirlo.
+
+agy-profiles è gratuito. Se ti è utile e vuoi contribuire, puoi lasciare un'offerta tramite PayPal. L'importo lo scegli tu ed è del tutto facoltativo.
+
+<div align="center">
+
+[![Dona con PayPal](https://img.shields.io/badge/Dona-PayPal-00457C?logo=paypal&logoColor=white&style=for-the-badge)](https://paypal.me/AndreaBonacci19)
+
+</div>
