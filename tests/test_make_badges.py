@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import runpy
 from pathlib import Path
 
 import pytest
@@ -168,6 +169,18 @@ def test_write_badges_creates_both_json_files(badges, tmp_path):
 
     assert json.loads((out / "test-badge.json").read_text())["message"] == "3 passed"
     assert json.loads((out / "coverage-badge.json").read_text())["message"] == "100%"
+
+
+def test_running_the_script_writes_badges_from_the_default_report_paths(tmp_path, monkeypatch):
+    write_junit(path=tmp_path / "test-results.xml", tests=3)
+    write_coverage(path=tmp_path / "coverage.json", display="100")
+    monkeypatch.chdir(tmp_path)
+
+    runpy.run_path(str(SCRIPT), run_name="__main__")
+
+    assert json.loads((tmp_path / "badges" / "test-badge.json").read_text())["message"] == (
+        "3 passed"
+    )
 
 
 @pytest.mark.parametrize("missing", ["junit", "coverage"])

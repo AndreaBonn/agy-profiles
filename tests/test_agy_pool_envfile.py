@@ -17,6 +17,8 @@ from conftest import PoolEnv
         ("AGY_POOL_DIR=\"/a b'", {"AGY_POOL_DIR": "\"/a b'"}),
         ('AGY_POOL_DIR="', {"AGY_POOL_DIR": '"'}),
         ("AGY_POOL_DIR=", {"AGY_POOL_DIR": ""}),
+        ('AGY_POOL_DIR=""', {"AGY_POOL_DIR": ""}),
+        ("AGY_POOL_DIR=''", {"AGY_POOL_DIR": ""}),
         ("AGY_POOL_A=x=y", {"AGY_POOL_A": "x=y"}),
         ("AGY_POOL_A=1\nAGY_POOL_B=2", {"AGY_POOL_A": "1", "AGY_POOL_B": "2"}),
     ],

@@ -77,6 +77,39 @@ def test_link_one_backs_up_existing_content_when_the_target_already_exists(
     assert int(backups[0].name.rsplit("-", 1)[1]) <= int(time.time())
 
 
+def test_link_one_creates_every_missing_parent_of_the_link(fresh_pool, tmp_path: Path) -> None:
+    link, target = tmp_path / "a" / "b" / "link", tmp_path / "target"
+
+    fresh_pool.link_one(link=link, target=target)
+
+    assert link.is_symlink()
+
+
+def test_link_one_moves_content_into_a_target_whose_parent_is_missing_at_depth(
+    fresh_pool, tmp_path: Path
+) -> None:
+    link, target = tmp_path / "link", tmp_path / "x" / "y" / "target"
+    link.mkdir()
+    (link / "conv.txt").write_text("history")
+
+    fresh_pool.link_one(link=link, target=target)
+
+    assert (target / "conv.txt").read_text() == "history"
+
+
+def test_link_one_moves_content_into_a_missing_target_whose_parent_exists(
+    fresh_pool, tmp_path: Path
+) -> None:
+    (tmp_path / "shared").mkdir()
+    link, target = tmp_path / "link", tmp_path / "shared" / "target"
+    link.mkdir()
+    (link / "conv.txt").write_text("history")
+
+    fresh_pool.link_one(link=link, target=target)
+
+    assert (target / "conv.txt").read_text() == "history"
+
+
 # --- add_allow_rules ------------------------------------------------------------------
 
 
