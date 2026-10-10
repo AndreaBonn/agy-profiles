@@ -1,0 +1,19 @@
+[project]
+name = "antigravity-account-pool"
+version = "0.1.0"
+description = "Round-robin of Antigravity CLI accounts with quota failover and a bridge to Claude Code config"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+extend-include = ["agy-pool"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

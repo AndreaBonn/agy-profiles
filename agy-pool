@@ -1,0 +1,455 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+
+POOL_DIR = Path(os.environ.get("AGY_POOL_DIR", str(Path.home() / ".agy-pool")))
+SHARED_DIR = POOL_DIR / "shared"
+STATE_FILE = POOL_DIR / "state.json"
+QUOTA_LOG = POOL_DIR / "quota-errors.log"
+STATE_REL = Path(".gemini") / "antigravity-cli"
+CONFIG_REL = Path(".gemini") / "config"
+DROPPED_AGENT_FIELDS = ("model", "tools")
+CLAUDE_DIR = Path.home() / ".claude"
+INLINE_RULES = ("python-stack", "git-workflow", "security")
+AGENTS_MD_BUDGET = 22_000
+CLAUDE_AGENTS_DIR = CLAUDE_DIR / "agents"
+TOKEN_NAME = "antigravity-oauth-token"
+SHARED_ITEMS = (
+    "conversations",
+    "brain",
+    "implicit",
+    "history.jsonl",
+    "conversation_summaries.db",
+    "settings.json",
+    "mcp",
+)
+PRINT_FLAGS = ("-p", "--print", "--prompt")
+RESET_HOURS = float(os.environ.get("AGY_POOL_RESET_HOURS", "5"))
+TAIL_BYTES = 4096
+EXIT_ALL_EXHAUSTED = 75
+CHECK_PROMPT = "Reply with the single word OK"
+
+QUOTA_RE = re.compile(
+    r"\b429\b|RESOURCE_EXHAUSTED|quota|rate.?limit|too many requests|usage limit|exhausted",
+    re.IGNORECASE,
+)
+INELIGIBLE_RE = re.compile(r"not eligible|eligibility", re.IGNORECASE)
+AUTH_RE = re.compile(r"authentication (required|failed)", re.IGNORECASE)
+
+
+def say(message: str) -> None:
+    print(f"[agy-pool] {message}", file=sys.stderr)
+
+
+def die(message: str, *, code: int = 1) -> None:
+    say(message)
+    sys.exit(code)
+
+
+@contextmanager
+def locked_state() -> Iterator[dict]:
+    """Yield the persisted state under an exclusive lock and save it on exit."""
+    POOL_DIR.mkdir(parents=True, exist_ok=True)
+    with open(POOL_DIR / "state.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
+        state.setdefault("current", None)
+        state.setdefault("quota_hit", {})
+        state.setdefault("ineligible", [])
+        yield state
+        STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True))
+
+
+def natural_key(name: str) -> list:
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", name)]
+
+
+def account_dirs() -> list[str]:
+    """Names of pool directories, in the fixed ring order."""
+    if not POOL_DIR.exists():
+        return []
+    names = [p.name for p in POOL_DIR.iterdir() if p.is_dir() and p.name != "shared"]
+    return sorted(names, key=natural_key)
+
+
+def has_token(name: str) -> bool:
+    return (POOL_DIR / name / STATE_REL / TOKEN_NAME).is_file()
+
+
+def agy_bin() -> str:
+    found = shutil.which("agy") or str(Path.home() / ".local" / "bin" / "agy")
+    if not Path(found).exists():
+        die("agy non trovato nel PATH")
+    return found
+
+
+def agy_env(*, name: str) -> dict[str, str]:
+    env = os.environ.copy()
+    env["HOME"] = str(POOL_DIR / name)
+    env["DBUS_SESSION_BUS_ADDRESS"] = "disabled"
+    return env
+
+
+def link_one(*, link: Path, target: Path) -> None:
+    """Make ``link`` a symlink to ``target`` without losing existing content."""
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.is_symlink():
+        if link.resolve() == target.resolve():
+            return
+        link.unlink()
+    elif link.exists():
+        if target.exists():
+            link.rename(link.with_name(f"{link.name}.pre-pool-{int(time.time())}"))
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(link), str(target))
+    if not target.exists() and not target.suffix:
+        target.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+
+
+def add_allow_rules(*, rules: list[str]) -> None:
+    """Merge ``rules`` into permissions.allow of the shared agy settings."""
+    settings = SHARED_DIR / "antigravity-cli" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    data = json.loads(settings.read_text()) if settings.exists() else {}
+    allow = data.setdefault("permissions", {}).setdefault("allow", [])
+    allow.extend(rule for rule in rules if rule not in allow)
+    settings.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def allow_pool_reads(*, name: str) -> None:
+    """Allow headless reads of MCP tool schemas and spilled tool output.
+
+    agy matches the path it opened (the per-account symlink), not its target,
+    so every account needs its own rule.
+    """
+    base = POOL_DIR / name / STATE_REL
+    add_allow_rules(rules=[f"read_file({base / sub})" for sub in ("mcp", "brain")])
+
+
+def ensure_shared_config() -> Path:
+    """Create the shared config dir, seeding it from the user's own agy config."""
+    shared_config = SHARED_DIR / "config"
+    real_config = Path.home() / CONFIG_REL
+    if not shared_config.exists():
+        if real_config.is_dir():
+            shutil.copytree(real_config, shared_config)
+        else:
+            shared_config.mkdir(parents=True)
+    return shared_config
+
+
+def link_shared(*, name: str) -> None:
+    allow_pool_reads(name=name)
+    home = POOL_DIR / name
+    shared_state = SHARED_DIR / "antigravity-cli"
+    for item in SHARED_ITEMS:
+        link_one(link=home / STATE_REL / item, target=shared_state / item)
+    link_one(link=home / CONFIG_REL, target=ensure_shared_config())
+
+
+def classify(*, returncode: int, tail: bytes) -> str:
+    if returncode == 0:
+        return "ok"
+    text = tail.decode(errors="replace")
+    for status, pattern in (
+        ("ineligible", INELIGIBLE_RE),
+        ("auth", AUTH_RE),
+        ("quota", QUOTA_RE),
+    ):
+        if pattern.search(text):
+            return status
+    return "error"
+
+
+def run_captured(*, name: str, args: list[str]) -> tuple[str, int, bytes]:
+    """Run agy on one account, echoing its output; return (status, rc, tail)."""
+    proc = subprocess.Popen(
+        [agy_bin(), *args],
+        env=agy_env(name=name),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    tail = bytearray()
+    assert proc.stdout is not None
+    for chunk in iter(lambda: proc.stdout.read1(4096), b""):
+        sys.stdout.buffer.write(chunk)
+        sys.stdout.buffer.flush()
+        tail += chunk
+        del tail[:-TAIL_BYTES]
+    returncode = proc.wait()
+    return classify(returncode=returncode, tail=bytes(tail)), returncode, bytes(tail)
+
+
+def record(*, name: str, status: str, tail: bytes) -> None:
+    with locked_state() as state:
+        if status == "ok":
+            state["quota_hit"].pop(name, None)
+            state["current"] = name
+        elif status == "quota":
+            state["quota_hit"][name] = time.time()
+        elif status == "ineligible" and name not in state["ineligible"]:
+            state["ineligible"].append(name)
+    if status == "quota":
+        with open(QUOTA_LOG, "a") as log:
+            stamp = time.strftime("%F %T")
+            log.write(f"--- {stamp} {name}\n{tail.decode(errors='replace')}\n")
+
+
+def usable_ring() -> list[str]:
+    with locked_state() as state:
+        banned = set(state["ineligible"])
+        start = state["current"]
+    names = [n for n in account_dirs() if has_token(n) and n not in banned]
+    if start in names:
+        index = names.index(start)
+        names = names[index:] + names[:index]
+    return names
+
+
+def recently_hit(*, name: str) -> bool:
+    with locked_state() as state:
+        hit = state["quota_hit"].get(name)
+    return hit is not None and time.time() - hit < RESET_HOURS * 3600
+
+
+def report_exhausted(*, names: list[str]) -> int:
+    with locked_state() as state:
+        hits = [state["quota_hit"].get(n) for n in names if state["quota_hit"].get(n)]
+    say(f"Quota esaurita su tutti i {len(names)} account del giro.")
+    if hits:
+        reset_at = min(hits) + RESET_HOURS * 3600
+        when = time.strftime("%F %H:%M", time.localtime(reset_at))
+        say(f"Primo ripristino stimato: {when} (stima: {RESET_HOURS:g}h dal primo errore).")
+    return EXIT_ALL_EXHAUSTED
+
+
+def run_with_failover(*, args: list[str]) -> int:
+    names = usable_ring()
+    if not names:
+        die("nessun account utilizzabile: `agy-pool pool login accN`")
+    for name in names:
+        if recently_hit(name=name):
+            continue
+        status, returncode, tail = run_captured(name=name, args=args)
+        record(name=name, status=status, tail=tail)
+        if status in ("ok", "error"):
+            return returncode
+        say(f"{name}: {status}, passo al successivo")
+    return report_exhausted(names=names)
+
+
+def run_interactive(*, args: list[str]) -> None:
+    names = usable_ring()
+    if not names:
+        die("nessun account utilizzabile: `agy-pool pool login accN`")
+    say(f"sessione su {names[0]} (nessun cambio automatico; poi `pool next`)")
+    os.execve(agy_bin(), [agy_bin(), *args], agy_env(name=names[0]))
+
+
+def convert_agent(*, text: str) -> str:
+    """Drop from the frontmatter of a Claude Code agent the fields agy rejects.
+
+    ``model`` holds a Claude id agy does not know, and ``tools`` names Claude
+    Code tools (``Read``, ``Grep``) that are not in agy's registry: either one
+    makes agy discard the agent or fail when it starts.
+    """
+    if not text.startswith("---\n"):
+        return text
+    end = text.find("\n---", 4)
+    if end == -1:
+        return text
+    kept: list[str] = []
+    skipping = False
+    for line in text[:end].split("\n"):
+        key = line.split(":", 1)[0]
+        if key in DROPPED_AGENT_FIELDS:
+            skipping = True
+            continue
+        if skipping and (line.startswith((" ", "-", "\t"))):
+            continue
+        skipping = False
+        kept.append(line)
+    return "\n".join(kept) + text[end:]
+
+
+def sync_agents() -> None:
+    """Mirror ~/.claude/agents into the shared agy config, converted."""
+    source = CLAUDE_AGENTS_DIR
+    target = SHARED_DIR / "config" / "agents"
+    if not source.is_dir():
+        return
+    target.mkdir(parents=True, exist_ok=True)
+    for src in source.glob("*.md"):
+        dst = target / src.name
+        if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
+            continue
+        dst.write_text(convert_agent(text=src.read_text()))
+    for dst in target.glob("*.md"):
+        if not (source / dst.name).exists():
+            dst.unlink()
+
+
+def rule_summary(*, path: Path) -> str:
+    """First markdown heading of a rule file, or its stem."""
+    for line in path.read_text().splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return path.stem
+
+
+def build_agents_md(*, rules_dir: Path) -> str:
+    """Global AGENTS.md: environment notes, a rules index and a few inlined rules.
+
+    agy caps one rules file at 24 KB, so inlined rules are added only while the
+    file stays under ``AGENTS_MD_BUDGET``; every rule stays reachable through
+    the index.
+    """
+    files = sorted(rules_dir.glob("*.md"))
+    lines = [
+        "# Regole condivise con Claude Code",
+        "",
+        f"Le regole vivono in `{rules_dir}/` e qui sono indicizzate o incluse, non copiate.",
+        "",
+        "## Differenze di ambiente",
+        "- Gli hook di Claude Code non girano in agy: i divieti scritti nelle regole non sono "
+        "bloccati da nulla, li applichi tu.",
+        "- Mai `git push`, push forzato o `git reset --hard` se l'utente non lo ha "
+        "chiesto in quel turno.",
+        "- I tool di Claude Code (`Agent`, `Skill`, `TaskUpdate`) non esistono qui: usa gli "
+        "strumenti di agy.",
+        "",
+        "## Regole da leggere prima di lavorare nel dominio",
+        "| File | Argomento |",
+        "|---|---|",
+    ]
+    lines += [f"| `{f}` | {rule_summary(path=f)} |" for f in files]
+    text = "\n".join(lines) + "\n\n## Regole sempre attive (incluse per intero)\n"
+    used = len(text.encode())
+    for name in INLINE_RULES:
+        path = rules_dir / f"{name}.md"
+        if path.is_file() and used + path.stat().st_size <= AGENTS_MD_BUDGET:
+            text += f"\n@[{name}]({path})\n"
+            used += path.stat().st_size
+    return text
+
+
+def cmd_init() -> None:
+    """One-shot bridge from a Claude Code setup to the pool's shared agy config."""
+    shared_config = ensure_shared_config()
+    skills = CLAUDE_DIR / "skills"
+    if skills.is_dir():
+        link_one(link=shared_config / "skills", target=skills)
+    rules = CLAUDE_DIR / "rules"
+    agents_md = shared_config / "AGENTS.md"
+    if agents_md.exists():
+        say("AGENTS.md già presente, non lo tocco")
+    elif rules.is_dir():
+        agents_md.write_text(build_agents_md(rules_dir=rules))
+        say(f"creato {agents_md}")
+    readable = [rules, skills, CLAUDE_DIR / "CLAUDE.md"]
+    add_allow_rules(rules=["command(ls)"] + [f"read_file({p})" for p in readable if p.exists()])
+    cmd_setup()
+
+
+def cmd_setup() -> None:
+    sync_agents()
+    for name in account_dirs():
+        link_shared(name=name)
+        say(f"{name}: stato condiviso collegato")
+
+
+def cmd_login(*, name: str) -> None:
+    (POOL_DIR / name / STATE_REL).mkdir(parents=True, exist_ok=True)
+    link_shared(name=name)
+    with locked_state() as state:
+        if name in state["ineligible"]:
+            state["ineligible"].remove(name)
+    os.execve(agy_bin(), [agy_bin()], agy_env(name=name))
+
+
+def cmd_check(*, only: list[str]) -> None:
+    for name in only or [n for n in account_dirs() if has_token(n)]:
+        status, _, tail = run_captured(name=name, args=["-p", CHECK_PROMPT])
+        record(name=name, status=status, tail=tail)
+        print(f"\n== {name}: {status}")
+
+
+def cmd_status() -> None:
+    with locked_state() as state:
+        snapshot = json.loads(json.dumps(state))
+    for name in account_dirs():
+        flags = []
+        if not has_token(name):
+            flags.append("senza login")
+        if name in snapshot["ineligible"]:
+            flags.append("non idoneo")
+        hit = snapshot["quota_hit"].get(name)
+        if hit:
+            reset = time.strftime("%F %H:%M", time.localtime(hit + RESET_HOURS * 3600))
+            flags.append(f"quota finita, ripristino stimato {reset}")
+        mark = "*" if name == snapshot["current"] else " "
+        print(f"{mark} {name}  {', '.join(flags) or 'pronto'}")
+
+
+def cmd_use(*, name: str | None) -> None:
+    if name is None:
+        names = usable_ring()
+        if not names:
+            die("nessun account utilizzabile")
+        name = names[1] if len(names) > 1 else names[0]
+    if name not in account_dirs():
+        die(f"account sconosciuto: {name}")
+    with locked_state() as state:
+        state["current"] = name
+    say(f"account corrente: {name}")
+
+
+def pool_command(*, argv: list[str]) -> None:
+    command, rest = (argv[0] if argv else "status"), argv[1:]
+    if command == "init":
+        cmd_init()
+    elif command == "setup":
+        cmd_setup()
+    elif command == "login" and rest:
+        cmd_login(name=rest[0])
+    elif command == "check":
+        cmd_check(only=rest)
+    elif command == "status":
+        cmd_status()
+    elif command in ("next", "use"):
+        cmd_use(name=rest[0] if rest else None)
+    else:
+        die("uso: agy-pool pool [init|setup|login NAME|check [NAME..]|status|next|use NAME]")
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    if argv[:1] != ["pool"]:
+        sync_agents()
+    if argv[:1] == ["pool"]:
+        pool_command(argv=argv[1:])
+    elif any(flag in argv or any(a.startswith(f"{flag}=") for a in argv) for flag in PRINT_FLAGS):
+        sys.exit(run_with_failover(args=argv))
+    else:
+        run_interactive(args=argv)
+
+
+if __name__ == "__main__":
+    main()
