@@ -1,7 +1,7 @@
 [project]
 name = "antigravity-account-pool"
 version = "0.1.0"
-description = "Round-robin of Antigravity CLI accounts with quota failover and a bridge to Claude Code config"
+description = "Multi-account profiles for Antigravity CLI (agy) and a bridge to Claude Code config"
 requires-python = ">=3.10"
 dependencies = []
 
